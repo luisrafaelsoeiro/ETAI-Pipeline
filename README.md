@@ -1,4 +1,7 @@
 # Baseline Predictive Pipeline -- ETAI
+Luis Soeiro 20211536
+
+Best model: The Decision Tree model performed slightly better than Logistic Regression, with a higher accuracy ()
 
 This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
 
