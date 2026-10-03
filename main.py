@@ -15,6 +15,7 @@ This orchestrates the full pipeline:
 import yaml
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
+from sklearn.metrics import classification_report
 
 from src.data import load_data
 from src.preprocessing import (
@@ -22,7 +23,7 @@ from src.preprocessing import (
 )
 from src.model import build_model
 from src.evaluate import (
-    cross_validate_pipeline, cv_report, oof_classification_report, fairness_report,
+    cross_validate_pipeline, cv_report, oof_classification_report, fairness_report, holdout_evaluation
 )
 from src.results import save_run
 
@@ -83,14 +84,49 @@ def main():
     # the model we'd actually use: same pipeline, refit on EVERY development row. CV above
     # estimated how well this recipe does; it didn't produce a model.
     final_model = pipeline.fit(X_dev, y_dev)
-    refit = f"Final model: {config['model']['type']} refit on all {len(X_dev)} development rows."
+
+    refit = (
+        f"Final model: {config['model']['type']} "
+        f"refit on all {len(X_dev)} development rows."
+    )
     print(refit)
     report += "\n" + refit + "\n"
 
-    locked = (f"Locked test set: {len(X_test)} rows set aside, not evaluated. "
-              f"Development set: {len(X_dev)} rows.")
+    # FINAL HOLDOUT EVALUATION:
+    # Predict the locked test set exactly once, after the model has been finalized.
+    y_test_pred = final_model.predict(X_test)
+    holdout_accuracy = (y_test_pred == y_test).mean()
+
+    holdout = (
+        f"Holdout accuracy (locked test set): {holdout_accuracy:.3f}"
+    )
+    print(holdout)
+    report += "\n" + holdout + "\n"
+
+    # Classification report on the locked holdout set
+    holdout_report = (
+        "\nClassification report (locked holdout test set):\n"
+        + classification_report(y_test, y_test_pred, zero_division=0)
+    )
+    print(holdout_report)
+    report += holdout_report + "\n"
+
+    # Fairness report on the locked holdout set
+    holdout_fairness = fairness_report(
+        y_test,
+        y_test_pred,
+        extras_test,
+        sensitive_attr=config["data"]["sensitive_attr"],
+    )
+    report += "\n" + holdout_fairness + "\n"
+
+    locked = (
+        f"Locked test set: {len(X_test)} rows evaluated once. "
+        f"Development set: {len(X_dev)} rows."
+    )
     print(locked)
     report += "\n" + locked + "\n"
+
 
     results_dir = config.get("output", {}).get("results_dir", "results")
     path = save_run(results_dir, config, report)

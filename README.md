@@ -9,17 +9,154 @@ Looking at the classification metrics in more detail, the two models exhibit dif
 
 Regarding the fairness analysis, the results cannot yet be considered reliable because the race variable contains inconsistent representations of the same categories. The race categories should therefore be standardized and the false-positive rates recalculated before drawing conclusions about differences between the models and COMPAS.
 
+| Model               | Holdout accuracy (W3) | CV accuracy (mean ± std) |   CV train–val gap |
+| ------------------- | --------------------: | -----------------------: | -----------------: |
+| Dummy               |             **0.550** |        **0.549 ± 0.000** | **−0.000 ± 0.000** |
+| Logistic regression |             **0.661** |        **0.673 ± 0.013** | **+0.001 ± 0.015** |
+| Decision tree       |             **0.619** |        **0.608 ± 0.014** | **+0.094 ± 0.020** |
+| Random forest       |                 **—** |        **0.645 ± 0.020** | **+0.093 ± 0.028** |
 
+I would trust Logistic regression's mean cross-validation accuracy of 0.673. Its accuracy on the locked holdout set was 0.661 with a very small train–validation gap of 0.001 provides a similar estimate of generalization performance.
 
-This is the **starting point** for your semester project: a small but *complete* predictive pipeline -- every piece a real project needs (entry point, config, data loading, preprocessing, model, evaluation), just kept as simple as possible for now.
+Yes — if your assignment’s Week 3 holdout accuracy was supposed to be recorded before the Random Forest was introduced, then you should not backfill the Random Forest holdout accuracy into that table.
 
-The task: predict two-year recidivism using ProPublica's COMPAS
-dataset -- the data behind a real 2016 investigation into a risk-
-assessment algorithm actually used by US courts to help inform bail and sentencing decisions. See `data/README.md` for the full problem description and a complete data dictionary before you start.
+The distinction is:
 
-It has some **deliberately weak spots**. Part of your work this
-semester is finding them and making them better -- see the pipeline progress table below, which tracks what changes and why as the weeks
-go on.
+Dummy, Logistic Regression, Decision Tree: have the original Week 3 holdout accuracy → report those values.
+Random Forest: if it was not evaluated on the holdout set as part of Week 3 → use — or N/A, even though you now technically have a holdout accuracy from the Week 4 run.
+The Random Forest's CV results can still be reported because those are part of the current Week 4 evaluation.
+
+So the table should be:
+
+Model	Holdout accuracy (W3)	CV accuracy (mean ± std)	CV train–val gap
+Dummy	0.550	0.549 ± 0.000	−0.000 ± 0.000
+Logistic regression	0.661	0.673 ± 0.013	+0.001 ± 0.015
+Decision tree	0.619	0.608 ± 0.014	+0.094 ± 0.020
+Random forest	—	0.645 ± 0.020	+0.093 ± 0.028
+
+The 0.636 Random Forest holdout accuracy should be kept in your Week 4 results, but not inserted into a column explicitly labelled “Holdout accuracy (W3)”.
+
+If this table is specifically meant to reproduce the Week 3 → Week 4 comparison, then — is the correct value for Random Forest.
+
+which number would you trust out of all of those model results, and why?
+
+For this experiment, I would trust the 5-fold cross-validation validation accuracy more than any single holdout number when judging how the models generalize, because it averages performance across five different validation splits.
+
+Your results:
+
+Model	CV validation accuracy	Holdout accuracy	Train–validation gap
+Dummy	0.549 ± 0.000	0.550	~0.000
+Logistic regression	0.673 ± 0.013	0.661	+0.001
+Decision tree	0.608 ± 0.014	0.619	+0.094
+Random forest	0.645 ± 0.020	0.636	+0.093
+The number I'd put the most weight on
+
+Logistic regression: 0.673 ± 0.013 CV accuracy.
+
+Why:
+
+It is based on five validation folds, rather than one particular test split.
+Its validation performance is relatively consistent (±0.013).
+Most importantly, its train–validation gap is only +0.001, meaning there isn't much evidence of overfitting.
+Its holdout accuracy, 0.661, is reasonably close to the CV estimate of 0.673. That gives some consistency between the development-set evaluation and the locked test set.
+
+The Random Forest's 0.636 holdout accuracy is still a legitimate result, but its CV result comes with a much larger train–validation gap (+0.093), which indicates substantially more overfitting than logistic regression.
+
+One important distinction
+
+I wouldn't say 0.673 is "the true accuracy." It's an estimate of expected performance based on your five CV validation folds. The 0.661 holdout accuracy is an independent final estimate from the locked test set.
+
+So for a report, I'd phrase it roughly as:
+
+Logistic regression achieved a mean cross-validation accuracy of 0.673 ± 0.013, with a very small train–validation gap of 0.001. Its accuracy on the locked holdout set was 0.661, providing a similar estimate of generalisation performance.
+
+That is a much stronger interpretation than simply choosing whichever single accuracy number is highest.
+
+3–5 sentences: Does your week 2/3 "best model" conclusion still hold under cross-validation?
+
+Models:
+Run: 20260923_094943 
+Model: decision_tree  params={'max_depth': 15} 
+Test size: 0.2  random_state: 42 
+============================================================ 
+ 
+Train accuracy: 0.770 
+Test accuracy:  0.621 
+Gap (train - test): +0.149 
+ 
+Classification report (test set): 
+              precision    recall  f1-score   support 
+ 
+           0       0.63      0.74      0.68       793 
+           1       0.60      0.48      0.53       650 
+ 
+    accuracy                           0.62      1443 
+   macro avg       0.62      0.61      0.61      1443 
+weighted avg       0.62      0.62      0.61      1443 
+ 
+False positive rate by race 
+(share of people who did NOT reoffend, but were predicted to) 
+ 
+  Our model: 
+    African-American     FPR = 0.32  (n=349) 
+    Asian                FPR = 0.00  (n=2) 
+    Caucasian            FPR = 0.23  (n=290) 
+    Hispanic             FPR = 0.19  (n=85) 
+    Native American      FPR = 0.00  (n=1) 
+    Other                FPR = 0.26  (n=54) 
+ 
+  COMPAS's own score: 
+    African-American     FPR = 0.44  (n=349) 
+    Asian                FPR = 0.00  (n=2) 
+    Caucasian            FPR = 0.24  (n=290) 
+    Hispanic             FPR = 0.16  (n=85) 
+    Native American      FPR = 1.00  (n=1) 
+    Other                FPR = 0.20  (n=54) 
+Run: 20260929_141153 
+Model: logistic_regression  params={'max_iter': 2000} 
+Test size: 0.2  random_state: 42 
+============================================================ 
+ 
+Train accuracy: 0.676 
+Test accuracy:  0.657 
+Gap (train - test): +0.019 
+ 
+Classification report (test set): 
+              precision    recall  f1-score   support 
+ 
+           0       0.65      0.80      0.72       793 
+           1       0.66      0.48      0.56       650 
+ 
+    accuracy                           0.66      1443 
+   macro avg       0.66      0.64      0.64      1443 
+weighted avg       0.66      0.66      0.65      1443 
+ 
+False positive rate by race 
+(share of people who did NOT reoffend, but were predicted to) 
+ 
+  Our model: 
+    African-American     FPR = 0.28  (n=349) 
+    Asian                FPR = 0.00  (n=2) 
+    Caucasian            FPR = 0.14  (n=290) 
+    Hispanic             FPR = 0.11  (n=85) 
+    Native American      FPR = 0.00  (n=1) 
+    Other                FPR = 0.19  (n=54) 
+ 
+  COMPAS's own score: 
+    African-American     FPR = 0.44  (n=349) 
+    Asian                FPR = 0.00  (n=2) 
+    Caucasian            FPR = 0.24  (n=290) 
+    Hispanic             FPR = 0.16  (n=85) 
+    Native American      FPR = 1.00  (n=1) 
+    Other                FPR = 0.20  (n=54) 
+conclusions:
+The logistic regression model performed slightly better overall, achieving a higher test accuracy than the decision tree (0.677 vs. 0.668). Both models have relatively small differences between training and test accuracy, with gaps of 0.001 and 0.012 respectively, indicating no clear signs of overfitting.
+
+Looking at the classification metrics in more detail, the two models exhibit different performance characteristics. Logistic regression performs better at identifying non-recidivists (class 0), achieving a higher recall (0.74 vs. 0.68) and F1-score (0.72 vs. 0.69). In contrast, the decision tree performs better at identifying recidivists (class 1), with higher recall (0.65 vs. 0.60) and a slightly higher F1-score (0.64 vs. 0.63). Therefore, the decision tree improves the detection of recidivism at the expense of performance on non-recidivists, rather than providing an overall improvement. Nevertheless, it is important to understand that only a simple model was used on noth logistic regression and decision tree, meaning no optimal / different parameters were considered to undertand which model could further improve the results
+
+Regarding the fairness analysis, the results cannot yet be considered reliable because the race variable contains inconsistent representations of the same categories. The race categories should therefore be standardized and the false-positive rates recalculated before drawing conclusions about differences between the models and COMPAS.
+
+No, the Week 2/3 conclusion does not fully hold under cross-validation. While logistic regression was already slightly better on the original test set, cross-validation strengthens this finding: logistic regression achieved 0.673 validation accuracy compared with 0.608 for the decision tree. The decision tree also shows a much larger train–validation gap (0.094 vs. 0.001), suggesting substantially more overfitting than the logistic regression model. Therefore, the cross-validation results support logistic regression as the more consistent model, although the original fairness conclusions should still be treated cautiously.
 
 ## Project structure
 

@@ -111,3 +111,38 @@ def fairness_report(y_true, y_pred, extras: pd.DataFrame, sensitive_attr: str = 
     text = "\n".join(lines)
     print(text)
     return text
+
+
+def holdout_evaluation(pipeline, X_dev, y_dev, X_test, y_test, extras_test):
+    """
+    Fit the final pipeline on the entire development set, then evaluate once
+    on the locked test set.
+
+    The test set must not be used for model selection, tuning, or preprocessing.
+    Because preprocessing is inside the Pipeline, it is fitted only on X_dev.
+    """
+    # Fit ONLY on the development data
+    pipeline.fit(X_dev, y_dev)
+
+    # Make predictions on the untouched locked test set
+    y_test_pred = pipeline.predict(X_test)
+
+    # Holdout accuracy
+    accuracy = (y_test_pred == y_test).mean()
+
+    print(f"Holdout accuracy: {accuracy:.3f}")
+
+    # Classification report
+    print("\nClassification report (locked holdout test set):")
+    print(classification_report(y_test, y_test_pred, zero_division=0))
+
+    # Fairness report on the holdout
+    print("\nFairness report (locked holdout test set):")
+    fairness = fairness_report(
+        y_test,
+        y_test_pred,
+        extras_test
+    )
+
+    return accuracy, y_test_pred
+

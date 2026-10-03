@@ -21,7 +21,7 @@ import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
+from sklearn.impute import SimpleImputer, KNNImputer
 from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import (
     OneHotEncoder, OrdinalEncoder, TargetEncoder, StandardScaler, MinMaxScaler, RobustScaler,
@@ -155,11 +155,16 @@ _ENCODERS = {
 def build_preprocessor(preprocessing_config: dict) -> ColumnTransformer:
     """
     Factory: builds a leak-safe ColumnTransformer for the chosen encoder/scaler pair --
-    read from `config.yaml`'s `preprocessing` section (chosen there, not hardcoded
-    here). Every encoder tolerates unseen
-    categories at transform time. Nothing is fit here: fitting happens later, on the
-    training part of each CV fold only, because this object is placed *inside* the
-    model's sklearn Pipeline (see main.py).
+    read from config.yaml's `preprocessing` section.
+
+    Numeric imputation supports:
+      - "median" / "mean": impute before scaling
+      - "knn": scale before KNN imputation so distance calculations are not
+        dominated by high-magnitude features.
+
+    Nothing is fit here: fitting happens later, on the training part of each
+    CV fold only, because this object is placed inside the model's sklearn
+    Pipeline.
     """
     encoder_name = preprocessing_config["encoder"]
     scaler_name = preprocessing_config["scaler"]
@@ -170,25 +175,54 @@ def build_preprocessor(preprocessing_config: dict) -> ColumnTransformer:
 
     scaler_factory = _SCALERS[scaler_name]
     scaler = scaler_factory() if callable(scaler_factory) else scaler_factory
-    encoder = _ENCODERS[encoder_name](preprocessing_config.get("random_state"))
+    encoder = _ENCODERS[encoder_name](
+        preprocessing_config.get("random_state")
+    )
 
-    numeric_pipeline = Pipeline([
-        ("impute", SimpleImputer(strategy=imputation.get("numeric_strategy", "median"))),
-        ("scale", scaler),
-    ])
+    numeric_strategy = imputation.get("numeric_strategy", "median")
+
+    if numeric_strategy == "knn":
+        numeric_pipeline = Pipeline([
+            ("scale", scaler),
+            (
+                "impute",
+                KNNImputer(
+                    n_neighbors=imputation.get("n_neighbors", 5)
+                ),
+            ),
+        ])
+    else:
+        numeric_pipeline = Pipeline([
+            (
+                "impute",
+                SimpleImputer(strategy=numeric_strategy),
+            ),
+            ("scale", scaler),
+        ])
+
     categorical_pipeline = Pipeline([
-        ("impute", SimpleImputer(strategy=imputation.get("categorical_strategy", "most_frequent"))),
+        (
+            "impute",
+            SimpleImputer(
+                strategy=imputation.get(
+                    "categorical_strategy",
+                    "most_frequent",
+                )
+            ),
+        ),
         ("encode", encoder),
     ])
 
-    indicator_cols = [f"{c}_was_missing" for c in mnar_indicator_sources]
+    indicator_cols = [
+        f"{c}_was_missing"
+        for c in mnar_indicator_sources
+    ]
 
     return ColumnTransformer([
         ("numeric", numeric_pipeline, numeric_features),
         ("categorical", categorical_pipeline, categorical_features),
         ("indicators", "passthrough", indicator_cols),
     ])
-
 
 def split_dev_test(X, y, extras, test_size: float, random_state: int):
     """
