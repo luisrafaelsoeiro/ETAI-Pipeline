@@ -1,9 +1,11 @@
 """
 Evaluation on the development set: stratified k-fold cross-validation of the whole pipeline,
-out-of-fold reports and a fairness check. The locked test set is never used here.
+out-of-fold reports, a fairness check and a paired comparison of two models. The locked test
+set is never used here.
 """
 import numpy as np
 import pandas as pd
+from scipy import stats
 from sklearn.metrics import classification_report
 from sklearn.model_selection import cross_validate
 
@@ -49,6 +51,24 @@ def cv_report(fold_scores: pd.DataFrame, scoring: str = "accuracy") -> str:
     text = "\n".join(lines)
     print(text)
     return text
+
+
+def corrected_paired_test(scores_a, scores_b, test_train_ratio: float) -> dict:
+    """
+    Corrected paired t-test (Nadeau & Bengio, 2003) for two models scored on the same CV folds.
+    Folds share most of their training rows, so their scores are correlated and the plain
+    t-test is overconfident; the variance of the differences is inflated by `test_train_ratio`
+    (validation rows / training rows per fold: 1 / (k - 1) for k-fold).
+
+    Returns the mean difference (a - b), the folds where a scores higher, t and the two-sided
+    p-value.
+    """
+    diff = np.asarray(scores_a, dtype=float) - np.asarray(scores_b, dtype=float)
+    k = len(diff)
+    se = np.sqrt((1 / k + test_train_ratio) * diff.var(ddof=1))
+    t = float(diff.mean() / se) if se > 0 else 0.0
+    p_value = float(2 * stats.t.sf(abs(t), df=k - 1))
+    return {"mean_diff": float(diff.mean()), "wins": f"{int((diff > 0).sum())}/{k}", "t": t, "p_value": p_value}
 
 
 def oof_classification_report(y_true, y_pred) -> str:
