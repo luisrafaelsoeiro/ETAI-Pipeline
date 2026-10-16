@@ -1,6 +1,31 @@
 # Baseline Predictive Pipeline -- ETAI
 Luis Soeiro 20211536
 
+# Pratical work conclusions
+## Week 2 | Baseline
+
+ **1. Column Disagreement: Are there rows where two columns disagree with each other (inconsistent together)**
+ 
+ The audit (consistency_audit_summary) identified two potential cross-column inconsistencies, involving age categories and COMPAS score labels. The other tested relationships showed no disagreements among comparable records. The duplicate checks also identified repeated records that should be investigated before preprocessing
+
+ **2. Additional Domain Rules: Is there a column you'd want a domain rule for that this notebook didn't build one for?**
+
+ - juv_misd_count and juv_other_count: Both should be non-negative because offense counts cannot be negative.
+ - juvenile_total: Should be non-negative and equal the sum of juv_fel_count, juv_misd_count, and juv_other_count.
+ - prior_offenses: Should be non-negative. It should also be compared with priors_count, since the two columns may represent the same information.
+ - age_in_months: Should represent a plausible age in months and be consistent with age, according to the column's documented definition.
+ - two_year_recid: Must contain only 0 or 1, because it is a binary classification target.
+ - Categorical columns (sex, race, age_cat, c_charge_degree, and score_text): Should contain only documented category values. Inconsistent capitalization, whitespace, unexpected labels, and placeholder tokens should be investigated.
+ - id: Should be present and unique if each identifier is expected to correspond to one record.
+
+ **3. Additional validation check: Is there any other invalid value that was not found in this notebook?**
+ - Unexpected categories in c_charge_degree, race, and sex: The audit flagged 274 records in c_charge_degree, 205 in race, and 49 in sex.
+ - Repeated identifiers (id): A total of 144 records belong to groups with repeated IDs. These records should be investigated to determine whether they are duplicate observations or whether the identifier's uniqueness assumption is incorrect.
+ - Non-numeric values in prior_offenses: The audit found 81 values that could not be converted to numeric values. These may be placeholders or invalid entries and should be inspected before conversion or imputation.
+ - Potentially invalid age_in_months values: Nine records fall below the assumed minimum of 216 months (18 years).
+ - Negative juvenile_total values: Four records violate the non-negative count rule
+
+
 ## Week 2/3 conclusions
 
 The logistic regression model performed slightly better overall, achieving a higher test accuracy than the decision tree (0.677 vs. 0.668). Both models have relatively small differences between training and test accuracy, with gaps of 0.001 and 0.012 respectively, indicating no clear signs of overfitting.
