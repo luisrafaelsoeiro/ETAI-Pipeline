@@ -93,8 +93,35 @@ No, the Week 2/3 conclusion does not fully hold under cross-validation. While lo
 
 
 ## Week 5 conclusions - Hyperparameter tuning
+Interpretation:
+
+- Best tuned CV accuracy: Random Forest at 0.683 ± 0.016, with a small mean train-validation gap of +0.008.
+- Largest improvement over default CV: Decision Tree, from 0.610 to 0.666, while its mean gap falls from +0.085 to +0.007.
+- Logistic Regression remains relatively stable, with a near-zero mean gap.
+- Oblique Random Forest improves from 0.647 to 0.672, but retains a larger gap (+0.041) than the other tuned models.
+- The tuning score is the best Optuna trial's mean inner-CV score, with its fold standard deviation shown. It is a selection score, not an unbiased estimate; use nested CV for comparing tuned performance.
+
+The best trial's hyperparameters shown above are from the full-development-set tuning study. They may differ from the parameters selected in individual outer folds.
 
 
+## Week 6 | Ensembles
+
+**MODEL EVALUATION**
+
+| Model                 | Default: CV mean ± std (gap) | Tuned: nested CV mean ± std (gap) | Tuning score (best trial) | Chosen hyperparameters                                                                                                      |
+| --------------------- | ---------------------------- | --------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| Logistic regression   | 0.672 ± 0.013 (+0.003)       | 0.674 ± 0.015 (+0.001)            | 0.675 ± 0.016             | `C=0.3908`, `class_weight=None`                                                                                             |
+| Decision tree         | 0.610 ± 0.018 (+0.085)       | 0.666 ± 0.007 (+0.007)            | 0.666 ± 0.007             | `max_depth=3`, `min_samples_leaf=49`, `min_samples_split=31`, `criterion='gini'`, `class_weight=None`                       |
+| Random forest         | 0.650 ± 0.019 (+0.082)       | 0.683 ± 0.016 (+0.008)            | 0.683 ± 0.016             | `n_estimators=212`, `max_depth=None`, `min_samples_leaf=27`, `max_features='log2'`, `criterion='gini'`, `class_weight=None` |
+| Oblique random forest | 0.647 ± 0.011 (+0.114)       | 0.672 ± 0.016 (+0.041)            | 0.672 ± 0.016             | `n_estimators=313`, `n_components=2`, `tree__max_depth=None`, `tree__min_samples_leaf=6`                                    |
+| AdaBoost              | 0.676 ± 0.012 (+0.006)       | 0.678 ± 0.013 (+0.015)            | 0.678 ± 0.013             | `estimator__max_depth=6`, `n_estimators=89`, `learning_rate=0.3204`                                                         |
+
+**1 & 3. Best model**
+I would choose the Random Forest, with nested CV accuracy of 0.683 ± 0.016 and a mean train–validation gap of +0.008.
+Its lead over the next-best model, AdaBoost (0.678), is only 0.005, which is smaller than the Random Forest's fold-to-fold standard deviation of 0.016. Therefore, the lead is not large enough to confidently conclude that Random Forest is better than AdaBoost. The results suggest similar performance, so I would choose Random Forest provisionally, while considering model simplicity and other evaluation metrics before making a final decision.
+
+**2. Hyperparameter reflection**
+The chosen hyperparameters mostly make sense given how each model works. Decision Tree selects a shallow tree (max_depth=3), which limits complexity and reduces overfitting, while Random Forest allows unlimited depth but uses large leaves (min_samples_leaf=27) to control overfitting across trees. Oblique Random Forest uses unlimited tree depth and smaller leaves (min_samples_leaf=6), resulting in more complex individual trees and a larger train–validation gap. AdaBoost uses moderately deep trees (max_depth=6), allowing individual learners to capture more complex patterns, although this may increase overfitting. Logistic Regression remains comparatively simple, with regularization controlled by C≈0.39, consistent with its near-zero train–validation gap.
 
 
 ## Project structure

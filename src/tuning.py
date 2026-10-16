@@ -78,29 +78,143 @@ def nested_cross_validate(pipeline, X, y, outer_cv, inner_cv, scoring: str, sear
     return pd.DataFrame(rows), y_oof
 
 
-def tuning_report(study, nested_scores: pd.DataFrame, scoring: str = "accuracy", top: int = 5) -> str:
+def nested_cv_report(
+    nested_scores: pd.DataFrame,
+    scoring: str = "accuracy",
+) -> str:
     """
-    Best hyperparameters and top trials of the final study, plus the optimism check (mean
-    tuning score vs mean honest score over the outer folds), as text (printed and returned).
+    Report the honest nested-CV performance and the train-validation gap.
+
+    The outer validation folds estimate the performance of the complete
+    tuning procedure on unseen development data.
     """
-    trials = study.trials_dataframe(attrs=("number", "value", "params", "user_attrs"))
-    trials = trials.rename(columns=lambda c: c.replace("params_", "").replace("user_attrs_", ""))
-    trials = trials.rename(columns={"number": "trial", "value": f"mean {scoring}"})
-    inner, outer = nested_scores["inner_best"].mean(), nested_scores["validation"].mean()
     lines = [
-        f"Tuning on the whole development set ({len(study.trials)} Optuna trials, metric: {scoring})",
-        f"Best hyperparameters: {study.best_params}",
-        f"Best mean CV score:   {study.best_value:.3f}  (the maximum over all trials -- optimistic)",
+        f"Nested cross-validation ({len(nested_scores)} outer folds, "
+        f"metric: {scoring})",
         "",
-        f"Top {top} trials:",
-        trials.sort_values(f"mean {scoring}", ascending=False).head(top)
-              .to_string(index=False, float_format=lambda v: f"{v:.3f}"),
+        nested_scores.to_string(
+            index=False,
+            float_format=lambda value: f"{value:.3f}",
+        ),
         "",
-        "Optimism check (nested CV):",
-        f"  tuning score inside the outer folds (inner_best) mean = {inner:.3f}",
-        f"  honest score on the outer folds (validation)     mean = {outer:.3f}",
-        f"  optimism = {inner - outer:+.3f}   -> report the honest one",
     ]
-    text = "\n".join(lines)
-    print(text)
-    return text
+
+    for column in ["train", "validation", "gap", "inner_best"]:
+        if column not in nested_scores.columns:
+            continue
+
+        values = nested_scores[column]
+        mean = values.mean()
+        std = values.std(ddof=1)
+
+        label = {
+            "train": "Train score",
+            "validation": "Outer validation score (HONEST estimate)",
+            "gap": "Train-validation gap",
+            "inner_best": "Inner best-trial score",
+        }[column]
+
+        sign = "+" if column == "gap" else ""
+        lines.append(
+            f"{label:<43} "
+            f"mean = {mean:{sign}.3f}   std = {std:.3f}"
+        )
+
+    lines.extend(["", "Hyperparameters selected in each outer fold:"])
+
+    parameter_columns = [
+        column
+        for column in nested_scores.columns
+        if column not in {
+            "fold", "train", "validation", "gap", "inner_best"
+        }
+    ]
+
+    if parameter_columns:
+        lines.append(
+            nested_scores[["fold"] + parameter_columns].to_string(
+                index=False
+            )
+        )
+    else:
+        lines.append("No hyperparameter columns were recorded.")
+
+    report = "\n".join(lines)
+    print(report)
+    return report
+
+
+def tuning_report(
+    study,
+    nested_scores: pd.DataFrame,
+    scoring: str = "accuracy",
+    top: int = 5,
+) -> str:
+    """
+    Report the full-development-set Optuna study and compare its score
+    with the honest nested-CV estimate.
+    """
+    trials = study.trials_dataframe(
+        attrs=("number", "value", "params", "user_attrs")
+    )
+
+    trials = trials.rename(
+        columns=lambda column: (
+            column.replace("params_", "")
+            .replace("user_attrs_", "")
+        )
+    )
+    trials = trials.rename(
+        columns={
+            "number": "trial",
+            "value": f"mean_{scoring}",
+            "std": "fold_std",
+        }
+    )
+
+    # Only completed trials with a valid objective score.
+    completed = trials.dropna(subset=[f"mean_{scoring}"])
+    top_trials = completed.sort_values(
+        f"mean_{scoring}", ascending=False
+    ).head(top)
+
+    inner_mean = nested_scores["inner_best"].mean()
+    outer_mean = nested_scores["validation"].mean()
+    outer_std = nested_scores["validation"].std(ddof=1)
+    gap_mean = nested_scores["gap"].mean()
+    gap_std = nested_scores["gap"].std(ddof=1)
+
+    lines = [
+        "=" * 72,
+        "OPTUNA HYPERPARAMETER TUNING",
+        "=" * 72,
+        f"Completed trials: {len(completed)}",
+        f"Metric: {scoring}",
+        "",
+        f"Best trial number: {study.best_trial.number}",
+        f"Best mean CV score: {study.best_value:.3f}",
+        f"Best trial fold std: "
+        f"{study.best_trial.user_attrs.get('std', float('nan')):.3f}",
+        f"Best hyperparameters: {study.best_params}",
+        "",
+        f"TOP {len(top_trials)} TRIALS",
+        top_trials.to_string(
+            index=False,
+            float_format=lambda value: f"{value:.3f}",
+        ),
+        "",
+        "=" * 72,
+        "NESTED CV: HONEST PERFORMANCE ESTIMATE",
+        "=" * 72,
+        f"Outer validation score: {outer_mean:.3f} ± {outer_std:.3f}",
+        f"Train-validation gap:   {gap_mean:+.3f} ± {gap_std:.3f}",
+        f"Inner best score mean:   {inner_mean:.3f}",
+        f"Inner minus outer score: {inner_mean - outer_mean:+.3f}",
+        "",
+        "Use the outer validation score to report tuned model performance.",
+        "The best Optuna trial score is a selection score, not an unbiased estimate.",
+    ]
+
+    report = "\n".join(lines)
+    print(report)
+    return report
