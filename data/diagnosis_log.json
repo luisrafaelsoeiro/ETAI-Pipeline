@@ -1,5 +1,5 @@
 {
-  "source_file": "data/compas_two_year_recidivism.csv",
+  "source_file": "../data/compas_two_year_recidivism.csv",
   "n_rows_raw": 7286,
   "missingness_verdicts": {
     "age": "MCAR",

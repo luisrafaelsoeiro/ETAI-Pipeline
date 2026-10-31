@@ -25,7 +25,9 @@ def save_run(results_dir: str, config: dict, report_text: str) -> str:
         "logistic_regression": "lg",
         "decision_tree": "dt",
         "random_forest": "rf",
-        "dummy": "dummy",
+        "dummy": "dm",
+        'oblique_random_forest': 'ob_rf',
+        'adaboost': 'ab'
     }
 
     # Use the abbreviation if it exists; otherwise keep the original model name
