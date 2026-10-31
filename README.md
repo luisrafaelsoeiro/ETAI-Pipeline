@@ -123,6 +123,29 @@ Its lead over the next-best model, AdaBoost (0.678), is only 0.005, which is sma
 **2. Hyperparameter reflection**
 The chosen hyperparameters mostly make sense given how each model works. Decision Tree selects a shallow tree (max_depth=3), which limits complexity and reduces overfitting, while Random Forest allows unlimited depth but uses large leaves (min_samples_leaf=27) to control overfitting across trees. Oblique Random Forest uses unlimited tree depth and smaller leaves (min_samples_leaf=6), resulting in more complex individual trees and a larger train–validation gap. AdaBoost uses moderately deep trees (max_depth=6), allowing individual learners to capture more complex patterns, although this may increase overfitting. Logistic Regression remains comparatively simple, with regularization controlled by C≈0.39, consistent with its near-zero train–validation gap.
 
+## Week 7 | 
+
+**1. Scoreboard**
+
+
+| Model | Tuned (nested) | Untuned | Floor | vs best: diff, wins, p |
+|---|---|---|---|---|
+| Gradient boosting | **0.727 ± 0.014** | 0.727 | 0.500 | -- (best) |
+| HistGradientBoosting | 0.727 ± 0.015 | 0.717 | 0.500 | +0.000, 3/5, p = 0.84 |
+| Random forest | 0.726 ± 0.014 | 0.683 | 0.500 | +0.001, 4/5, p = 0.77 |
+| AdaBoost | 0.724 ± 0.014 | 0.723 | 0.500 | +0.003, 5/5, p = 0.06 |
+| Logistic regression | 0.718 ± 0.014 | 0.719 | 0.500 | +0.009, 5/5, p = 0.008 |
+| Decision tree | 0.717 ± 0.016 | 0.604 | 0.500 | +0.010, 5/5, p = 0.035 |
+| Naive Bayes | 0.688 ± 0.011 | 0.685 | 0.500 | +0.039, 5/5, p = 0.001 |
+| Dummy (no model) | 0.500 ± 0.000 | -- | 0.500 | +0.227, 5/5, p < 0.001 |
+
+*The last column compares gradient boosting with each model using the corrected paired t-test on the same folds (`corrected_paired_test()`, test/train ratio 1/4).
+
+
+**Selection metric**
+
+We chose **ROC-AUC** (`cv.selection_metric: "roc_auc"`), because COMPAS is used to rank defendants by risk. ROC-AUC measures exactly that ranking, without depending on the 0.5 threshold, so the threshold stays a separate decision made on development data. It is also more stable from fold to fold than threshold metrics like accuracy: in the corrected paired test, gradient boosting vs logistic regression was clearly different on ROC-AUC (p = 0.006) but indistinguishable on accuracy (p = 0.38).
+
 
 ## Project structure
 
@@ -155,6 +178,8 @@ This table is updated after each practical class, so you can always see what cha
 | 4 | Preprocessing inside the pipeline + cross-validation -- evaluating a model honestly | A **locked final test set** (20%, stratified, seed 42) is set aside by `split_dev_test()` (replaces `split_train_test()`) and never scored; models are now judged by **stratified 5-fold cross-validation** of the whole pipeline (preprocessing + model) on the development set, reported per fold with mean ± std and the train-validation gap; the classification report and fairness check now use out-of-fold predictions; target encoding switched to scikit-learn's cross-fitting `TargetEncoder` (a row's own label never leaks into its own encoding), encoder/scaler set by hand in `config.yaml` (target encoding + robust scaling, reasons in the comments); **two fixes** in `clean_dataset()`: genuine `NaN`s in categorical columns were being turned into the string `"nan"` (a fake category), so 229 `c_charge_degree` gaps were never imputed or flagged -- fixed in `config.yaml` alone: `"nan"` added to `diagnostics.placeholder_tokens` (the category cleanup's last step turns listed tokens into `NaN`, after its text conversion); and it no longer drops rows -- de-duplication moved to a separate, training-only `drop_duplicate_rows()` (run before the dev/test split), so the same cleaning can run on new data where every row needs a prediction; `src/data_diagnostics.py` removed -- its one cleaning function (`flag_invalid_values`) moved into `preprocessing.py`, and the EDA-only checks (missingness test, duplicate counts) live in the EDA notebooks, not in every pipeline run; `dummy` (majority-class) model added as the floor to beat, and `random_forest` registered (sensible defaults, untuned); the final model is refit on the whole development set after CV; `config.yaml` gains `test_set` and `cv` sections -- see "Model evaluation" below |
 | 5 | Hyperparameter tuning without leakage | New `src/tuning.py`: hyperparameters are tuned with **Optuna** (seeded TPE sampler) on the development set only -- every candidate is scored by stratified 5-fold CV of the **whole** pipeline (preprocessing re-fit in every fold of every trial), on the same folds for every candidate; the tuning procedure is estimated honestly by **nested cross-validation** (the tuning repeated inside each outer CV fold, scored on the outer fold it never saw), whose out-of-fold predictions now feed the classification report and fairness check; the reported "best trial" score is shown next to the nested one as an optimism check; the final model is the tuned pipeline refit on all development rows; `build_pipeline()` in `src/model.py` now builds the preprocessing + model `Pipeline` (one place to add a learned step later); `config.yaml` gains a `tuning` section (on/off, trials, inner folds, seed, one search space per model type) and the model becomes the decision tree; `optuna` added to `requirements.txt`. The locked test set is still untouched -- see "Hyperparameter tuning" below |
 | 6 | Ensembles in depth: random forest, oblique random forest, AdaBoost | Two new model types in `src/model.py`: `oblique_random_forest` (a forest of oblique trees built from scikit-learn parts -- every tree splits on its own random sparse linear combinations of the features, via `SparseRandomProjection` inside `BaggingClassifier`) and `adaboost` (AdaBoost over decision trees of a chosen depth; stumps by default), both registered in `_MODELS`; the random forest is now the model `main.py` runs (200 trees, all CPU cores); `config.yaml` gains search spaces for the three ensembles -- the forests tune tree size (`max_depth`, `min_samples_leaf`) and decorrelation (`max_features` / number of combinations) but not the number of trees, AdaBoost tunes its base trees' depth, its number of rounds and its learning rate; `corrected_paired_test()` in `src/evaluate.py` compares two models scored on the same folds (Nadeau & Bengio's corrected paired t-test), so a "winner" is only called when the difference is bigger than fold-to-fold noise; `scipy` listed in `requirements.txt` (it already came with scikit-learn, so nothing new to install) -- see "Ensembles" below |
+| 7 | Boosting + evaluating with probabilities: several metrics, one selection metric, a scoreboard | New models in `_MODELS`: `gradient_boosting` (now the default), `hist_gradient_boosting` and `naive_bayes`, with search spaces in `config.yaml`; every run reports **eight metrics** (`cv.metrics`, built by `build_scorers()`), while tuning maximises one **selection metric** (`cv.selection_metric: "roc_auc"`, replacing `cv.scoring`) -- see "Selection metric" below; CV and nested CV keep **out-of-fold probabilities**, so the threshold is an explicit choice, and the report gains a confusion matrix; nested CV uses the same outer folds as the default CV; a **scoreboard** (`results/runs.csv`, written by `save_scores()`) logs each run's per-fold scores, untuned score and no-model floor, so runs can be compared with `corrected_paired_test()` -- see "Scoreboard" below; the locked test set is scored only when `test_set.evaluate: true`; no new packages |
+
 
 ## Preprocessing decisions
 
