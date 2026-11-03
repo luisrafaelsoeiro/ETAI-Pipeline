@@ -7,3 +7,4 @@ category-encoders>=2.6
 optuna>=4.0
 matplotlib>=3.7
 statsmodels>=0.14
+xgboost>=2.0

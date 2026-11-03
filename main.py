@@ -15,7 +15,9 @@ Workflow:
     -> (only when test_set.evaluate is true) evaluate once on the locked test set
 """
 from datetime import datetime
-
+import shutil
+import tempfile
+from datetime import datetime
 import numpy as np
 import optuna
 import pandas as pd
@@ -114,7 +116,18 @@ def main():
 
     # Preprocessing stays inside the pipeline so that it is fitted
     # separately on each training fold during cross-validation.
-    pipeline = build_pipeline(config["preprocessing"], config["model"])
+    # Feature selection (optional) sits between preprocessing and the model, inside the pipeline.
+    selection_config = config.get("feature_selection") or {}
+    selection_enabled = selection_config.get("enabled", False)
+    selection_label = (f"VoteSelector(min_votes={selection_config.get('min_votes', 2)})"
+                       if selection_enabled else "off")
+    print(f"Feature selection: {selection_label}")
+
+    # Fitted prep/select steps are cached in a fresh folder for this run (deleted at the end),
+    # so tuning the model doesn't refit them in every trial.
+    cache_dir = tempfile.mkdtemp(prefix="pipeline_cache_")
+    pipeline = build_pipeline(config["preprocessing"], config["model"], selection_config, memory=cache_dir)
+
 
     # The floor: a dummy classifier on the same folds (what "no model" scores).
     floor_pipeline = build_pipeline(config["preprocessing"], {"type": "dummy"})
@@ -133,6 +146,7 @@ def main():
           f"train-validation gap: {fold_scores['gap'].mean():+.3f}   no-model floor: {floor:.3f}")
 
     report += (
+        f"Feature selection: {selection_label}\n"
         f"Hyperparameters from config.yaml: {config['model'].get('params')}\n\n"
         + cv_report(fold_scores, metrics, selection_metric, "Cross-validation (default hyperparameters)")
         + f"\n\nNo-model floor (dummy, same folds): {selection_metric} = {floor:.3f}"
@@ -161,6 +175,11 @@ def main():
                 f"Optuna tuning is enabled, but no search space was found for model '{model_type}'. "
                 f"Add 'tuning.search_spaces.{model_type}' to config.yaml, or set tuning.enabled: false."
             )
+
+        # Tune how strict the selection is together with the model's hyperparameters.
+        if selection_enabled:
+            search_space = {**search_space, **(selection_config.get("search_space") or {})}
+
 
         n_trials = tuning_config.get("n_trials", 10)
         tuning_seed = tuning_config.get("random_state", cv_config.get("random_state"))
@@ -221,9 +240,19 @@ def main():
     # ---------------------------------------------------------
 
     final_model = final_pipeline.fit(X_dev, y_dev)
+
+    # The features the final model keeps (the select step's output names).
+    kept_line = ""
+    if "select" in final_model.named_steps:
+        kept = final_model[:-1].get_feature_names_out()
+        kept_line = f"Features kept ({len(kept)}): {', '.join(kept)}"
+
     refit = (f"Final model: {model_type} {'(tuned)' if tuning_enabled else '(default)'} "
              f"refit on all {len(X_dev)} development rows.")
     report += "\n" + refit + "\n"
+    
+    if kept_line:
+        report += kept_line + "\n"
 
     # ---------------------------------------------------------
     # 8. SCOREBOARD
@@ -236,6 +265,7 @@ def main():
         "tuned": tuning_enabled,
         "encoder": config["preprocessing"]["encoder"],
         "scaler": config["preprocessing"]["scaler"],
+        "feature_selection": selection_label,
         "params": str(config["model"].get("params")),
         "tuned_params": str(study.best_params) if tuning_enabled else "",
         "metric": selection_metric,
@@ -249,8 +279,7 @@ def main():
     same = runs[(runs["data"] == row["data"]) & (runs["metric"] == selection_metric)]
     board = (
         same.sort_values("mean", ascending=False)
-        [["run", "model", "tuned", "encoder", "scaler", "mean", "std", "untuned", "floor"]]
-        .rename(columns={"mean": selection_metric})
+        [["run", "model", "tuned", "encoder", "scaler", "feature_selection", "mean", "std", "untuned", "floor"]]        .rename(columns={"mean": selection_metric})
         .to_string(index=False, float_format=lambda v: f"{v:.3f}")
     )
     print(f"\nScoreboard (runs on the same data and metric; best first)\n{board}")
@@ -286,6 +315,9 @@ def main():
     path = save_run(config.get("output", {}).get("results_dir", "results"), run, config, report)
     print(f"\n{refit}\nFull report (per-fold tables, tuning, confusion matrix, fairness): {path}")
 
+    shutil.rmtree(cache_dir, ignore_errors=True)
+    if kept_line:
+        print(f"\n{kept_line}")
 
 if __name__ == "__main__":
     main()

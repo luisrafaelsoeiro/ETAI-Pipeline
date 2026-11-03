@@ -40,6 +40,7 @@ def save_run(results_dir: str, run: str, config: dict, report_text: str) -> str:
         "gradient_boosting": "gb",
         "hist_gradient_boosting": "hgb",
         "naive_bayes": "nb",
+        "xgboost": "xgb",
     }
 
     # Use the abbreviation if it exists; otherwise keep the original model name
