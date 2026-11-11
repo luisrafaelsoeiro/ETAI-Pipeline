@@ -3,6 +3,9 @@ data:
   target: "two_year_recid"
   sensitive_attr: "race"                            # never a feature; used only for the fairness report
   drop_columns: ["id", "decile_score", "score_text"]  # kept in the data, never used as features
+  # an existing score the fairness report compares with (week 9: was hard-coded in src/):
+  # every value other than `negative` counts as predicted 1 ("Medium"/"High" = predicted to reoffend)
+  reference_score: {column: "score_text", negative: "Low", label: "COMPAS's own score"}
 
 # Locked test set: never used to fit, tune or choose anything. Do not change once set.
 test_set:

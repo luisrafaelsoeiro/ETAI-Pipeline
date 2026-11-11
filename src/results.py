@@ -13,7 +13,7 @@ def save_scores(path: str, row: dict) -> pd.DataFrame:
     return runs
 
 
-def save_run(results_dir: str, run: str, config: dict, report_text: str) -> str:
+def save_run(results_dir: str, run: str, config: dict, report_text: str, config_path: str = "config.yaml") -> str:
     """
     Writes the run's settings and full report to:
     `results_dir/<model_abbreviation>_<run>.txt`
@@ -54,8 +54,9 @@ def save_run(results_dir: str, run: str, config: dict, report_text: str) -> str:
     test_set = config["test_set"]
 
     tuning_line = (
-        f"Optuna, {tuning['n_trials']} trials x {tuning['n_splits']} folds, "
-        f"nested CV  random_state={tuning['random_state']}  "
+        # the same defaults main.py uses when a key is left out (week 9: no KeyError)
+        f"Optuna, {tuning.get('n_trials', 10)} trials x {tuning.get('n_splits', cv['n_splits'])} folds, "
+        f"nested CV  random_state={tuning.get('random_state', cv.get('random_state'))}  "
         f"(maximises {cv['selection_metric']})"
         if tuning.get("enabled")
         else "off"
@@ -63,6 +64,7 @@ def save_run(results_dir: str, run: str, config: dict, report_text: str) -> str:
 
     header = (
         f"Run: {run}\n"
+        f"Config: {config_path}   data: {config['data']['path']}   target: {config['data']['target']}\n"
         f"Model: {model_type}  "
         f"params={config['model'].get('params')}\n"
         f"Preprocessing: encoder={config['preprocessing']['encoder']}  "

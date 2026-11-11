@@ -10,6 +10,7 @@ from sklearn.ensemble import (
 from sklearn.feature_selection import SelectorMixin
 from sklearn.naive_bayes import GaussianNB
 from sklearn.linear_model import LogisticRegression
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.random_projection import SparseRandomProjection
 from sklearn.tree import DecisionTreeClassifier
@@ -73,6 +74,11 @@ class VoteSelector(SelectorMixin, BaseEstimator):
     Keeps the features chosen by at least `min_votes` of three models, fitted on the training
     rows only: a random forest and gradient boosting vote for features with above-average
     importance, an L1-penalised logistic regression for features it doesn't shrink to zero.
+
+    Week 9, for any dataset: with three or more classes the L1 model has one row of
+    coefficients per class, and a feature counts as used when it is non-zero for ANY class
+    (with two classes that is the single row, as before). If no feature reaches `min_votes`,
+    the most-voted features are kept, so the model never receives zero columns.
     """
 
     def __init__(self, min_votes: int = 2, random_state=None):
@@ -82,11 +88,20 @@ class VoteSelector(SelectorMixin, BaseEstimator):
     def fit(self, X, y):
         forest = RandomForestClassifier(n_estimators=200, min_samples_leaf=20, random_state=self.random_state, n_jobs=-1).fit(X, y)
         booster = GradientBoostingClassifier(random_state=self.random_state).fit(X, y)
-        lasso = LogisticRegression(l1_ratio=1.0, C=0.01, solver="liblinear").fit(X, y)
+        lasso = LogisticRegression(l1_ratio=1.0, C=0.01, solver="liblinear")
+        if len(np.unique(y)) > 2:
+            # liblinear fits two classes only: one L1 model per class (one vs rest), one row of
+            # coefficients each
+            lasso = OneVsRestClassifier(lasso).fit(X, y)
+            coefficients = np.vstack([estimator.coef_ for estimator in lasso.estimators_])
+        else:
+            coefficients = lasso.fit(X, y).coef_
         self.votes_ = ((forest.feature_importances_ > forest.feature_importances_.mean()).astype(int)
                        + (booster.feature_importances_ > booster.feature_importances_.mean())
-                       + (np.abs(lasso.coef_[0]) > 1e-8))
+                       + (np.abs(coefficients).max(axis=0) > 1e-8))
         self.support_ = self.votes_ >= self.min_votes
+        if not self.support_.any():
+            self.support_ = self.votes_ == self.votes_.max()
         return self
 
     def _get_support_mask(self):

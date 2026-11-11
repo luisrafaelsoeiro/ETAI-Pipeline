@@ -2,41 +2,46 @@
 Entry point for the predictive pipeline.
 
 Run with:
-    python main.py
+    python main.py                      # COMPAS (config.yaml)
+    python main.py config_adult.yaml    # any other problem, with its own config file
 
 Workflow:
-    load config -> load and clean data -> drop duplicate rows
-    -> split features/target -> lock the final test set
+    load and check the config -> load and clean data -> check the config against the data
+    -> drop duplicate rows and rows without a target -> split features/target
+    -> encode the target labels as 0 .. k-1 -> lock the final test set
     -> no-model floor and default stratified cross-validation (every metric)
     -> optional Optuna tuning (on the selection metric) and nested cross-validation
     -> out-of-fold reports (confusion matrix, classification report, fairness)
     -> refit the selected pipeline on all development data
+    -> predict the new, unlabelled rows (only when the config has a `predict` section)
     -> add the run to the scoreboard -> save results
     -> (only when test_set.evaluate is true) evaluate once on the locked test set
 """
-from datetime import datetime
+import argparse
 import shutil
 import tempfile
 from datetime import datetime
-import numpy as np
 import optuna
-import pandas as pd
-import yaml
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 
+from src.config import check_dataset, load_config, search_space_for
 from src.data import load_data
 from src.preprocessing import (
+    check_feature_columns,
     clean_dataset,
     drop_duplicate_rows,
+    drop_missing_target,
+    encode_target,
     split_features_target,
     split_dev_test,
 )
+from src.predict import predict_new_data, save_predictions
 from src.model import build_pipeline
 from src.evaluate import (
     build_scorers,
     cross_validate_pipeline,
     cv_report,
+    holdout_report,
     oof_classification_report,
     fairness_report,
 )
@@ -49,18 +54,27 @@ from src.tuning import (
 )
 
 
-def load_config(path: str = "config.yaml") -> dict:
-    """Load the project configuration."""
-    with open(path, "r", encoding="utf-8") as file:
-        return yaml.safe_load(file)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run the predictive pipeline for one problem.")
+    parser.add_argument("config", nargs="?", default="config.yaml",
+                        help="config file of the problem to run (default: config.yaml, COMPAS)")
+    return parser.parse_args()
 
 
-def main():
-    config = load_config()
-    run = datetime.now().strftime("%Y%m%d_%H%M%S")
+def run(config_path: str = "config.yaml") -> dict:
+    """
+    Runs the whole pipeline for the problem described by `config_path` and returns the main
+    results (report path, scores, classes, predictions path). The config is checked on its own
+    and then against the data before anything is fitted (`src/config.py`): a wrong setting stops
+    the run at the start with every problem listed.
+    """
+    config = load_config(config_path)
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_type = config["model"]["type"]
-    sensitive_attr = config["data"]["sensitive_attr"]
+    sensitive_attr = config["data"].get("sensitive_attr")      # optional: no fairness report without it
+    reference_score = config["data"].get("reference_score")   # e.g. COMPAS's own score, for the fairness report
     report = ""
+    print(f"Config: {config_path}")
 
     # ---------------------------------------------------------
     # 1. LOAD, CLEAN AND PREPARE DATA
@@ -68,14 +82,33 @@ def main():
 
     # Cleaning is row-preserving and does not learn preprocessing
     # parameters from the data.
-    df_raw = load_data(config["data"]["path"])
+    df_raw = load_data(config["data"]["path"], **config["data"]["read_options"])
     df_clean = clean_dataset(df_raw, config["diagnostics"])
 
-    # Prevent duplicate records from being counted more than once.
-    df_clean = drop_duplicate_rows(df_clean, config["diagnostics"].get("id_column"))
+    # The config against the data: target, columns, classes, metrics (errors stop the run here).
+    for warning in check_dataset(df_clean, config, config_path):
+        print(f"Note: {warning}")
+        report += f"Note: {warning}\n"
 
-    mnar_sources = config["preprocessing"].get("mnar_indicator_sources", [])
+    # Training only: duplicate records counted once; rows without a target can't be learned from.
+    df_clean = drop_duplicate_rows(df_clean, config["diagnostics"].get("id_column"))
+    df_clean = drop_missing_target(df_clean, config["data"]["target"])
+
+    mnar_sources = config["preprocessing"].get("mnar_indicator_sources") or []
     X, y, extras = split_features_target(df_clean, config["data"], mnar_sources)
+
+    # Every listed feature must exist; a column listed nowhere would be dropped silently.
+    unused = check_feature_columns(X, config["preprocessing"])
+    if unused:
+        print(f"Columns not listed as features (left out of the model): {unused}")
+        report += f"Columns not listed as features (left out of the model): {unused}\n"
+
+    # Labels -> 0 .. k-1 (any labels, two or more classes); `classes` keeps the original names.
+    y, classes = encode_target(y, config["data"].get("positive_class"))
+    target_line = (f"Target: {config['data']['target']}   classes: {classes}"
+                   + (f"   (positive class: {classes[1]!r})" if len(classes) == 2 else ""))
+    print(target_line)
+    report += target_line + "\n"
 
     # ---------------------------------------------------------
     # 2. LOCK THE FINAL TEST SET
@@ -126,6 +159,24 @@ def main():
     # Fitted prep/select steps are cached in a fresh folder for this run (deleted at the end),
     # so tuning the model doesn't refit them in every trial.
     cache_dir = tempfile.mkdtemp(prefix="pipeline_cache_")
+    try:
+        return _cross_validate_tune_refit(
+            config, config_path, run_id, report, cache_dir, X_dev, X_test, y_dev, y_test,
+            extras_dev, extras_test, classes, cv, scorers, metrics, selection_metric, n_jobs,
+            selection_config, selection_enabled, selection_label, sensitive_attr, reference_score,
+        )
+    finally:
+        # removed even when the run fails (week 9: it used to be left behind on an error)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def _cross_validate_tune_refit(config, config_path, run_id, report, cache_dir, X_dev, X_test, y_dev, y_test,
+                               extras_dev, extras_test, classes, cv, scorers, metrics, selection_metric,
+                               n_jobs, selection_config, selection_enabled, selection_label,
+                               sensitive_attr, reference_score) -> dict:
+    """Steps 4-10 of `run`: CV, optional tuning, reports, refit, predictions, scoreboard, saving."""
+    model_type = config["model"]["type"]
+    cv_config = config["cv"]
     pipeline = build_pipeline(config["preprocessing"], config["model"], selection_config, memory=cache_dir)
 
 
@@ -141,13 +192,13 @@ def main():
     floor = floor_scores["validation"].mean()
     untuned = fold_scores["validation"].mean()
 
-    print("\nDefault hyperparameters (config.yaml)")
+    print(f"\nDefault hyperparameters ({config_path})")
     print(f"  {selection_metric}: {untuned:.3f} ± {fold_scores['validation'].std(ddof=1):.3f}   "
           f"train-validation gap: {fold_scores['gap'].mean():+.3f}   no-model floor: {floor:.3f}")
 
     report += (
         f"Feature selection: {selection_label}\n"
-        f"Hyperparameters from config.yaml: {config['model'].get('params')}\n\n"
+        f"Hyperparameters from {config_path}: {config['model'].get('params')}\n\n"
         + cv_report(fold_scores, metrics, selection_metric, "Cross-validation (default hyperparameters)")
         + f"\n\nNo-model floor (dummy, same folds): {selection_metric} = {floor:.3f}"
     )
@@ -168,18 +219,9 @@ def main():
         # Supported configuration layouts:
         #   tuning.search_spaces[model_type]   (preferred)
         #   tuning.search_space
-        search_spaces = tuning_config.get("search_spaces") or {}
-        search_space = search_spaces.get(model_type) or tuning_config.get("search_space") or {}
-        if not search_space:
-            raise ValueError(
-                f"Optuna tuning is enabled, but no search space was found for model '{model_type}'. "
-                f"Add 'tuning.search_spaces.{model_type}' to config.yaml, or set tuning.enabled: false."
-            )
-
-        # Tune how strict the selection is together with the model's hyperparameters.
-        if selection_enabled:
-            search_space = {**search_space, **(selection_config.get("search_space") or {})}
-
+        # The model's space, plus how strict the selection is when selection is on (checked
+        # by load_config: every parameter name exists in the pipeline).
+        search_space = search_space_for(config)
 
         n_trials = tuning_config.get("n_trials", 10)
         tuning_seed = tuning_config.get("random_state", cv_config.get("random_state"))
@@ -232,8 +274,9 @@ def main():
     for name in metrics:
         print(f"  {name:<18s} {final_scores[name].mean():.3f} ± {final_scores[name].std(ddof=1):.3f}")
 
-    report += "\n\n" + oof_classification_report(y_dev, oof_proba)
-    report += "\n" + fairness_report(y_dev, oof_proba, extras_dev, sensitive_attr=sensitive_attr)
+    report += "\n\n" + oof_classification_report(y_dev, oof_proba, classes=classes)
+    report += "\n" + fairness_report(y_dev, oof_proba, extras_dev, sensitive_attr=sensitive_attr,
+                                     reference=reference_score, classes=classes)
 
     # ---------------------------------------------------------
     # 7. REFIT THE SELECTED PIPELINE ON ALL DEVELOPMENT DATA
@@ -244,8 +287,11 @@ def main():
     # The features the final model keeps (the select step's output names).
     kept_line = ""
     if "select" in final_model.named_steps:
-        kept = final_model[:-1].get_feature_names_out()
-        kept_line = f"Features kept ({len(kept)}): {', '.join(kept)}"
+        try:
+            kept = final_model[:-1].get_feature_names_out()
+            kept_line = f"Features kept ({len(kept)}): {', '.join(kept)}"
+        except (AttributeError, ValueError):       # a step without feature names
+            kept_line = f"Features kept: {int(final_model.named_steps['select'].support_.sum())} (names unavailable)"
 
     refit = (f"Final model: {model_type} {'(tuned)' if tuning_enabled else '(default)'} "
              f"refit on all {len(X_dev)} development rows.")
@@ -255,12 +301,34 @@ def main():
         report += kept_line + "\n"
 
     # ---------------------------------------------------------
+    # 7b. PREDICT NEW, UNLABELLED ROWS (only with a `predict` section)
+    # ---------------------------------------------------------
+
+    # Same cleaning and feature split as the training data, no row dropped: rows out = rows in.
+    predict_config = config.get("predict")
+    saved = None
+    if predict_config:
+        new_raw = load_data(predict_config["path"],
+                            **(predict_config.get("read_options") or config["data"]["read_options"]))
+        predictions = predict_new_data(final_model, new_raw, config, predict_config.get("threshold", 0.5), classes)
+        saved = save_predictions(predictions, predict_config["output"])
+        shares = predictions["prediction"].value_counts(normalize=True)
+        shown = (f"{shares.get(classes[1], 0.0):.1%} predicted {classes[1]}" if len(classes) == 2
+                 else ", ".join(f"{name}: {shares.get(name, 0.0):.1%}" for name in classes))
+        predicted_line = (f"Predicted {len(predictions)} new rows ({len(new_raw)} in) from {predict_config['path']}: "
+                          f"{shown} -> {saved}")
+        print(predicted_line)
+        report += predicted_line + "\n"
+
+    # ---------------------------------------------------------
     # 8. SCOREBOARD
     # ---------------------------------------------------------
 
     row = {
-        "run": run,
+        "run": run_id,
         "data": config["data"]["path"],
+        "target": config["data"]["target"],
+        "config": config_path,
         "model": model_type,
         "tuned": tuning_enabled,
         "encoder": config["preprocessing"]["encoder"],
@@ -276,7 +344,9 @@ def main():
         **{f"fold_{i}": score for i, score in enumerate(final_scores["validation"], start=1)},
     }
     runs = save_scores(config.get("output", {}).get("scoreboard", "results/runs.csv"), row)
-    same = runs[(runs["data"] == row["data"]) & (runs["metric"] == selection_metric)]
+    # runs on the same data, target and metric (rows saved before week 9 have no target column)
+    same_target = runs["target"].isna() | (runs["target"] == row["target"])
+    same = runs[(runs["data"] == row["data"]) & same_target & (runs["metric"] == selection_metric)]
     board = (
         same.sort_values("mean", ascending=False)
         [["run", "model", "tuned", "encoder", "scaler", "feature_selection", "mean", "std", "untuned", "floor"]]        .rename(columns={"mean": selection_metric})
@@ -292,19 +362,8 @@ def main():
     # The locked test set is used once, for the final chosen model, never while comparing
     # models. Keep test_set.evaluate: false for every scoreboard run.
     if config["test_set"].get("evaluate", False):
-        y_test_proba = final_model.predict_proba(X_test)[:, 1]
-        y_test_pred = (y_test_proba >= 0.5).astype(int)
-        cm = pd.DataFrame(confusion_matrix(y_test, y_test_pred), index=["true 0", "true 1"],
-                          columns=["predicted 0", "predicted 1"])
-        holdout = (
-            f"Locked test set ({len(X_test)} rows, evaluated once, threshold 0.5)\n"
-            f"  accuracy: {(y_test_pred == np.asarray(y_test)).mean():.3f}   "
-            f"roc_auc: {roc_auc_score(y_test, y_test_proba):.3f}\n\n"
-            f"{cm.to_string()}\n\n"
-            f"{classification_report(y_test, y_test_pred, zero_division=0)}\n"
-            "Fairness on the locked test set (header says out-of-fold; these are test rows):\n"
-            + fairness_report(y_test, y_test_proba, extras_test, sensitive_attr=sensitive_attr)
-        )
+        holdout, _, _, _ = holdout_report(final_model, X_test, y_test, extras_test, classes,
+                                          sensitive_attr, reference=reference_score)
         print("\n" + holdout)
         report += "\n" + holdout + "\n"
 
@@ -312,12 +371,18 @@ def main():
     # 10. SAVE RESULTS
     # ---------------------------------------------------------
 
-    path = save_run(config.get("output", {}).get("results_dir", "results"), run, config, report)
+    path = save_run(config.get("output", {}).get("results_dir", "results"), run_id, config, report, config_path)
     print(f"\n{refit}\nFull report (per-fold tables, tuning, confusion matrix, fairness): {path}")
 
-    shutil.rmtree(cache_dir, ignore_errors=True)
     if kept_line:
         print(f"\n{kept_line}")
+    return {"run": run_id, "report": path, "scores": final_scores, "untuned": untuned, "floor": floor,
+            "classes": classes, "predictions": saved, "kept": kept_line}
+
+
+def main():
+    run(parse_args().config)
+
 
 if __name__ == "__main__":
     main()

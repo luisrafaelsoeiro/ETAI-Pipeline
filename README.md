@@ -154,24 +154,176 @@ With feature selection, tuned XGBoost keeps only 2 of the 10 features (age and p
 
 I would keep selection on: for the same score, a two-feature model is far easier to explain and audit, slightly more stable across folds (std 0.012 vs 0.016), and its false positive rates by race are essentially unchanged (0.31 vs 0.30 for African-American defendants). The costs are a slower pipeline and no fairness gain
 
+## Week 9 | Beyond COMPAS (option A: Adult income)
+
+**The question:** does a person earn more than 50,000 USD a year (`income_over_50k`)? Same pipeline, new data: 6,000 labelled people (`data/adult_train.csv`, 24% earn > 50K) and 2,000 new people to predict (`data/adult_new.csv`).
+
+**How to run**
+
+```bash
+python main.py config_adult.yaml    # Adult income
+python main.py                      # COMPAS, unchanged (config.yaml)
+```
+
+Everything Adult-specific is in `config_adult.yaml`, with its own output folder (`results/adult/`, scoreboard `results/adult/runs.csv`). The final run tunes XGBoost with feature selection in nested CV (about 6 minutes). With `tuning.enabled: false` it takes about 10 seconds. After the final refit it writes the predictions for `adult_new.csv` to `predictions/adult_new_predictions.csv` (`id`, `probability`, `prediction`).
+
+**What broke, why, and how it was fixed**
+
+| What broke | Why: the hidden COMPAS assumption | Fix |
+|---|---|---|
+| `python main.py` always ran COMPAS | `load_config()` always read `config.yaml` | `python main.py [config]` (argparse, default `config.yaml`). The run prints its config file and writes it in the report header |
+| `"?"` stayed a real category in `workclass` (379), `occupation` (381) and `native_country` (86), and the `workclass_was_missing` flag was 0 on every row. **Nothing crashed** | placeholder tokens became `NaN` only inside `_canonicalize_categories()`, which only touches the columns listed in `canonical_categories` (COMPAS's columns with spelling variants). Adult's columns have no spelling variants, so they were never cleaned | `_placeholders_to_nan()` in `clean_dataset()`: every text column. After it: 379 / 381 / 86 missing, no `"?"` left |
+| fairness report: `KeyError: 'score_text'` | `fairness_report()` always compared the model with COMPAS's own score, and `split_features_target()` always kept `score_text` in `extras` | the comparison score is now a config setting, `data.reference_score` (COMPAS: `score_text`, `"Low"` = predicted 0). Without one (Adult), the report shows the model's rates only. The header wording is generic ("true class 0, predicted 1") |
+| validity rules | COMPAS's `age: {min: 18}` would turn all 74 seventeen-year-olds into missing values | config only: Adult's own rules (`age` 17–90, `hours_per_week` 1–99, `education_num` 1–16, capital gain / loss ≥ 0). 99999 in `capital_gain` is the census top code, so it is kept |
+| a feature missing from the lists is dropped silently | the `ColumnTransformer` uses only the listed columns and drops the rest without an error | `check_feature_columns()`: raises if a listed feature isn't in the data, and the run prints any column listed nowhere (none, for both configs) |
+| no way to predict new rows | `main.py` only evaluated on labelled data | `src/predict.py` → `predict_new_data()`: the same cleaning (but no `drop_duplicate_rows`), the same feature split (no target), the refit pipeline's probability and a 0/1 prediction at 0.5. It checks rows out = rows in. Turned on by a `predict` section in the config |
+| messages naming `config.yaml` | written for one config | they name the config actually used |
+
+Untouched and working on Adult:
+- the target encoder (binary);
+- `VoteSelector`;
+- `drop_duplicate_rows` (no duplicates);
+- stratified folds, tuning, nested CV, the scoreboard.
+
+**COMPAS still runs exactly as before:** the same per-fold scores, chosen hyperparameters, nested ROC-AUC (0.728 ± 0.016), confusion matrix and false positive rates by race. The only difference in its report is the generic header line of the fairness section.
+
+**Data decisions** (`config_adult.yaml`, from the data card in `notebooks/09_beyond_compas.ipynb`)
+- **`"?"` → missing:**
+  - categories: imputed with the most frequent value;
+  - a `workclass_was_missing` flag: the same 379 people are missing `occupation`, and they earn > 50K half as often (12% vs 25%);
+  - `v01`–`v06` (about 3% empty, no pattern): median.
+- **Not features:**
+  - `id`;
+  - `fnlwgt`: a census sampling weight, not a trait of the person;
+  - `education`: the same as `education_num`, one to one; `education_num` keeps the order.
+- **Target encoding:** `native_country` has 41 values; one-hot would add about 40 columns.
+- **Sensitive attributes:** the pipeline audits **`sex`** (never a feature). **`race` is not a feature either:** a protected attribute shouldn't decide an income-based outcome, and leaving it out costs nothing. Offered as a feature, it got no vote from the selector, and the scores were identical (0.913). `relationship` (husband / wife) and `marital_status` still carry information about sex, which is why the fairness report still matters.
+- **All 25 undocumented `v` columns are offered as features,** and feature selection decides.
+
+**Results** (development set, 4,800 rows, the same 5 stratified folds; nested CV when tuned)
+
+| Run | Tuning | Feature selection | ROC-AUC | Accuracy | F1 (class 1, 0.5) |
+|---|---|---|---|---|---|
+| No model (always "≤ 50K") | — | — | 0.500 | 0.761 | 0.000 |
+| XGBoost, default parameters | off | off | 0.905 ± 0.018 | 0.857 ± 0.014 | 0.663 ± 0.044 |
+| XGBoost, default parameters | off | `min_votes = 2` | 0.913 ± 0.016 | 0.864 ± 0.011 | 0.686 ± 0.030 |
+| XGBoost, tuned | 30 trials | off | 0.906 ± 0.015 | 0.858 ± 0.010 | 0.663 ± 0.027 |
+| **XGBoost, tuned (`config_adult.yaml`)** | **30 trials** | **tuned (`min_votes` 1–2)** | **0.910 ± 0.014** | **0.859 ± 0.009** | **0.675 ± 0.028** |
+| Target | | | ≥ 0.90 | ≥ 0.855 | ≥ 0.66 |
+
+Corrected paired t-test on ROC-AUC, same folds:
+
+| Comparison | Difference | Folds won | p |
+|---|---|---|---|
+| tuned: with selection vs without | +0.004 | 5/5 | 0.029 |
+| default: with selection vs without | +0.009 | 4/5 | 0.098 |
+| with selection: tuned vs default | −0.003 | 1/5 | 0.24 |
+| without selection: tuned vs default | +0.002 | 3/5 | 0.62 |
+
+**Features kept** by the final model (8 of 36):
+- numeric: `age`, `education_num`, `capital_gain`, `capital_loss`, `hours_per_week`;
+- categorical: `marital_status`, `occupation`, `relationship`.
+
+**No `v` column:** all 25 get 0 of 3 votes, as do `workclass`, `native_country` and the `workclass` flag. So `min_votes` 1 and 2 keep the same 8 features.
+
+**Fairness** (false positive rate by sex, out-of-fold, final model): women 0.02 (n = 1,390), men 0.09 (n = 2,261). Women earn > 50K less often in this sample, so the model rarely predicts it for them. A full audit would also compare the true positive rates.
+
+**Predictions:** `predictions/adult_new_predictions.csv` has 2,000 rows in and 2,000 out, with 20.0% predicted > 50K (24% in the training data).
+
+**Reflection**
+- **The hardest assumption to find was the placeholder cleaning.** Nothing crashed: `"?"` simply became one more category and the missingness flag stayed 0. Only the `value_counts(dropna=False)` check showed it. The fairness report at least failed loudly.
+- **What got us to the targets** was clean inputs, and above all feature selection. The 25 undocumented columns are noise (no model voted for any of them), and removing them is the only change the corrected test calls significant (+0.004 ROC-AUC, 5/5 folds, p = 0.03).
+- **Tuning added nothing measurable on Adult.** The default XGBoost settings already suit it, and default + selection is as good as the tuned run (p = 0.24) at a fraction of the time.
+- **The final config keeps tuning on,** so the reported scores are the honest nested estimate of the full procedure, and all three targets hold in that run.
+
+### Running any dataset safely
+
+Adult showed that some COMPAS assumptions fail silently. So after it, every module was audited for anything that only works for one dataset or one kind of target. The pipeline now runs any **classification** dataset from a config file, and a config that doesn't fit its data stops the run **before anything is fitted**, with every problem listed. A regression target (a continuous number) is rejected with a clear message: stratified folds, classifiers and class probabilities don't apply to it.
+
+**What was assumed, and what changed**
+
+| Part | Assumption found | Now |
+|---|---|---|
+| config (`main.py`) | read without any check: a typo in a name surfaced minutes into a run, or never (an unlisted column is just dropped) | new `src/config.py`. `load_config()` fills the defaults of optional settings and `validate_config()` checks the file on its own: required keys, known encoder / scaler / imputer / model / metric names, features listed twice or as both kinds, the target or sensitive attribute listed as a feature, search spaces (does every parameter exist in the pipeline? `low` < `high`?). `check_dataset()` then checks it against the data (below). Every problem is reported at once (`ConfigError`) |
+| target labels | the target had to be 0/1: XGBoost needs 0 .. k-1, and the reports printed "true 0 / true 1" | `encode_target()` maps any labels ("yes"/"no", ">50K", "Low"/"Medium"/"High", True/False) to 0 .. k-1, and keeps the original names for every report and for the predictions file. Two classes: the positive class is `data.positive_class`, or the larger label by default. A 0/1 target keeps exactly its values |
+| number of classes | binary only: probabilities stored as `[:, 1]`, a 2×2 confusion matrix, the binary target encoder, `VoteSelector`'s `coef_[0]`, a binary fairness report and locked-test block | probabilities are kept as one column per class. With three or more classes, the prediction is the most probable class, and the target encoder is `auto`. `VoteSelector` counts a feature as used when it is non-zero for any class (one-vs-rest L1, because `liblinear` fits two classes only). The confusion matrix and report name the classes. The fairness report gives a per-class false positive rate by group, and the locked test reports `roc_auc_ovr` |
+| metrics | `precision`, `recall`, `f1`, `roc_auc`, `average_precision` and `fbeta_2` only exist for two classes | with three or more classes these are rejected with a suggestion (`f1_macro`, `roc_auc_ovr`, ...); `fbeta_<beta>_<average>` (e.g. `fbeta_2_macro`) added |
+| sensitive attribute | required | optional (`data.sensitive_attr: null`): the fairness report says it was skipped |
+| rows without a target | crashed the stratified split | dropped from the training data only, and reported |
+| data files | CSV with default settings only | `.csv`, `.txt`, `.tsv`, `.parquet`, `.xlsx`, `.xls` and `.json`, by extension; reader options from `data.read_options` (e.g. `{sep: ";", decimal: ","}`); clear errors for a missing or empty file, an unsupported type or repeated column names |
+| cleaning | `_canonicalize_categories` turned real NaNs into the text `"nan"`, which only became missing again because COMPAS lists `"nan"` as a placeholder | a real NaN stays NaN; pandas `category` columns become plain values |
+| text in a numeric feature | reached the imputer and crashed there | stopped at the start: add the column to `diagnostics.numeric_text_columns` or list it as categorical |
+| feature selection | could keep zero features (then the model crashes) | keeps the most-voted features when none reaches `min_votes` |
+| new data | needed an `id` column and printed "% predicted 1" | uses the row number when there is no id; outputs the original labels (and one `probability_<class>` column per class for multiclass); stops with a clear error if a feature is missing |
+| run folder, report | the cache folder was left behind when a run failed; `tuning['n_trials']` etc. crashed when a key was left out | the cache is always removed; the defaults match `main.py`. The report header and scoreboard also record the config file and target |
+
+**Checked against the data before fitting** (`check_dataset()`):
+- the target exists, has at least 2 classes and isn't continuous;
+- every class has enough rows for the locked test split and the stratified folds, including the inner tuning folds;
+- every listed feature, indicator source, sensitive attribute and reference column exists;
+- numeric features really are numeric, and no feature is entirely empty;
+- the metrics suit the number of classes;
+- `data.positive_class` is one of the labels.
+
+Columns listed nowhere, a missing id column and rows without a target are reported as notes.
+
+**Adding a new dataset**
+1. Put the file in `data/` and copy `config_adult.yaml` to `config_<name>.yaml`. Its comments say what each setting is for.
+2. `data`:
+   - `path` and `target` (any labels);
+   - `drop_columns` (ids, leakage, non-features);
+   - `sensitive_attr` (or `null`);
+   - optionally `positive_class` and `read_options`.
+3. `diagnostics`:
+   - placeholder tokens;
+   - this dataset's own validity rules;
+   - spelling variants;
+   - text columns that are really numeric;
+   - redundant columns.
+4. `preprocessing`:
+   - `numeric_features`, `categorical_features` and `mnar_indicator_sources`. A column listed nowhere is left out (the run says which).
+5. `cv.metrics` and `selection_metric`: with three or more classes, use the multiclass versions (`f1_macro`, `roc_auc_ovr`, ...).
+6. `output`: its own results folder and scoreboard. Add a `predict` section to score new rows.
+7. Run `python main.py config_<name>.yaml` with `tuning.enabled: false` first. Any config problem is listed at the start.
+
+**Automated checks** (`python tests/test_datasets.py`, 6 tests, all passing). Synthetic datasets run through the whole pipeline:
+1. a yes/no target with text labels, from a semicolon-separated file, with placeholders, spelling variants, a numeric column stored as text, rows without a target, repeated ids, an unlisted column, and new data without an id;
+2. a three-class target with XGBoost, tuning, nested CV, feature selection, multiclass metrics, the locked-test evaluation and per-class probabilities;
+3. numeric features only, no sensitive attribute, a tab-separated file;
+4. eleven configs that must be rejected before fitting, each with the expected message;
+5. target label encoding and the positive class;
+6. `config.yaml` and `config_adult.yaml` passing every check.
+
+**COMPAS and Adult give the same numbers as before this audit.** Both were re-run and their reports compared line by line.
+
 ## Project structure
 
 ```
 .
-├── main.py                  # entry point: run the whole pipeline
-├── config.yaml               # all tunable settings live here
+├── main.py                  # entry point: python main.py [config file] (default config.yaml)
+├── config.yaml               # COMPAS: all tunable settings live here
+├── config_adult.yaml         # Adult income (week 9): the same pipeline on a new dataset
 ├── requirements.txt
 ├── src/
-│   ├── data.py               # loading
+│   ├── config.py             # loads a config and checks it, on its own and against the data, before anything is fitted (week 9)
+│   ├── data.py               # loading (csv, tsv, txt, parquet, excel, json; reader options from the config)
 │   ├── preprocessing.py      # row-preserving cleaning (incl. domain-rule checks), training-only de-duplication, deployable preprocessing pipeline, and the split that locks the final test set away (week 4)
 │   ├── model.py               # model construction (incl. the oblique random forest and AdaBoost builders, week 6) + build_pipeline(): preprocessing + model as one estimator (week 5)
 │   ├── evaluate.py           # stratified k-fold cross-validation, out-of-fold report + fairness check (week 4), corrected paired test to compare two models (week 6)
 │   ├── tuning.py             # hyperparameter tuning with Optuna + nested cross-validation (week 5)
+│   ├── predict.py            # predicts new, unlabelled rows with the refit pipeline (week 9)
 │   └── results.py            # saves each run's report to disk
-├── results/                  # created automatically -- one file per run (not tracked in git)
+├── tests/
+│   └── test_datasets.py      # synthetic datasets (text labels, three classes, numeric only) and configs that must be rejected (week 9)
+├── results/                  # created automatically -- one file per run (not tracked in git); results/adult/ for Adult
+├── predictions/
+│   └── adult_new_predictions.csv   # id, probability, prediction for the 2,000 rows of adult_new.csv (week 9)
 └── data/
     ├── compas_two_year_recidivism.csv
-    └── README.md              # problem description + full data dictionary
+    ├── README.md              # problem description + full data dictionary
+    ├── adult_train.csv        # Adult income: 6,000 labelled people (week 9)
+    ├── adult_new.csv          # Adult income: 2,000 new people, no target
+    └── ADULT_README.md        # Adult column descriptions
 ```
 
 ## Pipeline progress
@@ -187,6 +339,7 @@ This table is updated after each practical class, so you can always see what cha
 | 6 | Ensembles in depth: random forest, oblique random forest, AdaBoost | Two new model types in `src/model.py`: `oblique_random_forest` (a forest of oblique trees built from scikit-learn parts -- every tree splits on its own random sparse linear combinations of the features, via `SparseRandomProjection` inside `BaggingClassifier`) and `adaboost` (AdaBoost over decision trees of a chosen depth; stumps by default), both registered in `_MODELS`; the random forest is now the model `main.py` runs (200 trees, all CPU cores); `config.yaml` gains search spaces for the three ensembles -- the forests tune tree size (`max_depth`, `min_samples_leaf`) and decorrelation (`max_features` / number of combinations) but not the number of trees, AdaBoost tunes its base trees' depth, its number of rounds and its learning rate; `corrected_paired_test()` in `src/evaluate.py` compares two models scored on the same folds (Nadeau & Bengio's corrected paired t-test), so a "winner" is only called when the difference is bigger than fold-to-fold noise; `scipy` listed in `requirements.txt` (it already came with scikit-learn, so nothing new to install) -- see "Ensembles" below |
 | 7 | Boosting + evaluating with probabilities: several metrics, one selection metric, a scoreboard | New models in `_MODELS`: `gradient_boosting` (now the default), `hist_gradient_boosting` and `naive_bayes`, with search spaces in `config.yaml`; every run reports **eight metrics** (`cv.metrics`, built by `build_scorers()`), while tuning maximises one **selection metric** (`cv.selection_metric: "roc_auc"`, replacing `cv.scoring`) -- see "Selection metric" below; CV and nested CV keep **out-of-fold probabilities**, so the threshold is an explicit choice, and the report gains a confusion matrix; nested CV uses the same outer folds as the default CV; a **scoreboard** (`results/runs.csv`, written by `save_scores()`) logs each run's per-fold scores, untuned score and no-model floor, so runs can be compared with `corrected_paired_test()` -- see "Scoreboard" below; the locked test set is scored only when `test_set.evaluate: true`; no new packages |
 | 8 | XGBoost + feature selection | New model `xgboost` in `_MODELS` (now the default), with a search space that includes its in-split brakes (`gamma`, `reg_alpha`, `reg_lambda`, `min_child_weight`); new `VoteSelector` (random forest, gradient boosting and L1 logistic regression vote; keeps features with ≥ `min_votes`) added by `build_pipeline()` as a `"select"` step, so selection is re-fit in every fold; `memory=` caches fitted steps in a temporary folder per run; `config.yaml` gains `feature_selection` (with `select__min_votes` tuned in nested CV); `main.py` reports the kept features and logs the setting on the scoreboard; result: selection keeps only `age` and `priors_count` with no significant loss (ROC-AUC 0.725 vs 0.728, p ≈ 0.55), so it stays on; `xgboost>=2.0` in `requirements.txt` -- see "Feature selection" below |
+| 9 | Beyond COMPAS -- option A: a new dataset (Adult income) | `main.py` takes the config file as an argument (`python main.py config_adult.yaml`; default `config.yaml`); new `config_adult.yaml` with its own output folder; placeholder tokens now become `NaN` in **every** text column (`_placeholders_to_nan()`), not only in `canonical_categories`; the fairness report's comparison with COMPAS's `score_text` moved to the config (`data.reference_score`); `check_feature_columns()` catches listed features that aren't in the data and reports unlisted columns; then every module audited for dataset-specific assumptions: new `src/config.py` checks a config on its own and against the data before anything is fitted; any labels (`encode_target()`) and two or more classes (probabilities per class, class-named reports, multiclass fairness, one-vs-rest L1 in `VoteSelector`); optional sensitive attribute; more file formats and reader options; `tests/test_datasets.py`; new `src/predict.py` and a `predict` config section predict new rows after the final refit (`predictions/adult_new_predictions.csv`); the COMPAS run gives exactly the same numbers -- see "Beyond COMPAS" above |
 
 
 ## Preprocessing decisions
@@ -313,6 +466,16 @@ With the environment active (see above), from the project's root
 folder, on any OS:
 ```bash
 python main.py
+```
+
+To run another problem, pass its config file (week 9; see "Beyond COMPAS" above):
+```bash
+python main.py config_adult.yaml
+```
+
+To check that the pipeline still handles other kinds of datasets and rejects bad configs (a few seconds):
+```bash
+python tests/test_datasets.py
 ```
 
 This loads `config.yaml`, diagnoses and cleans the data (week 3), locks the final test set away, cross-validates preprocessing + model on the development set (week 4), tunes the model's hyperparameters if `tuning.enabled` is on (week 5 -- see "Hyperparameter tuning" above; minutes, not seconds, for the ensembles of week 6), and prints:

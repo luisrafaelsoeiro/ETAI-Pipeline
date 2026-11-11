@@ -1,0 +1,125 @@
+# Week 9 -- option A: the same pipeline on a new dataset (UCI Adult income, data/ADULT_README.md).
+# Run with:  python main.py config_adult.yaml
+# Everything Adult-specific lives here; config.yaml (COMPAS) is unchanged.
+
+data:
+  path: "data/adult_train.csv"
+  target: "income_over_50k"
+  sensitive_attr: "sex"                             # audited in the fairness report; never a feature
+  # id: identifier. fnlwgt: a census sampling weight (how many people the row represents), not
+  # a trait of the person. race: the second protected attribute -- not used as a feature (README,
+  # "Beyond COMPAS"). education is dropped in cleaning (redundant_columns below).
+  drop_columns: ["id", "fnlwgt", "race"]
+  # no existing score to compare with in the fairness report (COMPAS has score_text)
+  reference_score: null
+  # optional, for any dataset (src/config.py checks them):
+  positive_class: null      # yes/no target: the label that counts as positive (default: the larger, here 1)
+  read_options: {}          # passed to the pandas reader, e.g. {sep: ";", decimal: ","}
+
+# Locked test set: never used to fit, tune or choose anything. Do not change once set.
+test_set:
+  size: 0.2
+  random_state: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  random_state: 42
+  metrics: ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "fbeta_2", "roc_auc", "average_precision"]
+  selection_metric: "roc_auc"
+  n_jobs: 1
+
+diagnostics:
+  id_column: "id"
+  numeric_text_columns: []                          # every numeric column already loads as a number
+  # "?" = unknown in workclass (379), occupation (381) and native_country (86). Cleaning now turns
+  # placeholders into NaN in every text column (week 9 fix), not only in canonical_categories.
+  placeholder_tokens: ["-", "?", "n/a", "N/A", "na", "NA", "", "nan"]
+  # Adult's own rules: none is violated in these files, but they protect future data.
+  # A 17-year-old is valid here (74 people), so COMPAS's `age: {min: 18}` must not be copied.
+  validity_rules:
+    age: {min: 17, max: 90}
+    education_num: {min: 1, max: 16}
+    hours_per_week: {min: 1, max: 99}
+    capital_gain: {min: 0}                          # 99999 is the census top code ("99999 or more"): valid
+    capital_loss: {min: 0}
+  canonical_categories: {}                          # no spelling variants in these files
+  # education = education_num one to one ("Bachelors" is always 13); education_num keeps the order
+  redundant_columns: ["education"]
+
+preprocessing:
+  encoder: "target"                                 # native_country has 41 values: one-hot would add ~40 columns
+  scaler: "robust"
+  numeric_features: ["age", "education_num", "capital_gain", "capital_loss", "hours_per_week",
+                     "v01", "v02", "v03", "v04", "v05", "v06", "v07", "v08", "v09",
+                     "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"]
+  categorical_features: ["workclass", "marital_status", "occupation", "relationship", "native_country",
+                         "v19", "v20", "v21", "v22", "v23", "v24", "v25"]
+  # the "?" in workclass are the "?" in occupation (+ 2 who never worked); these people earn > 50K
+  # about half as often (12% vs 25%): the gap carries information -> one flag (the same rows)
+  mnar_indicator_sources: ["workclass"]
+  random_state: 42
+  imputation:
+    numeric_strategy: "median"                      # v01-v06: ~3% empty, no pattern
+    categorical_strategy: "most_frequent"
+
+# Learned step between preprocessing and the model: keeps the features that at least
+# min_votes of three models (random forest, gradient boosting, L1 logistic regression) choose.
+feature_selection:
+  enabled: true
+  min_votes: 2
+  random_state: 42
+  search_space:
+    select__min_votes: {type: int, low: 1, high: 3}
+
+model:
+  type: "xgboost"
+  params:
+    n_estimators: 300
+    learning_rate: 0.05
+    max_depth: 4
+    random_state: 42
+    n_jobs: -1
+
+tuning:
+  enabled: true
+  n_trials: 30
+  n_splits: 5
+  random_state: 42
+  search_spaces:
+    logistic_regression:
+      model__C: {type: float, low: 0.0001, high: 100, log: true}
+      model__class_weight: {type: categorical, choices: [null, "balanced"]}
+    random_forest:
+      model__n_estimators: {type: int, low: 100, high: 400}
+      model__max_depth: {type: categorical, choices: [null, 5, 8, 12, 16, 20]}
+      model__min_samples_leaf: {type: int, low: 1, high: 50, log: true}
+      model__max_features: {type: categorical, choices: ["sqrt", "log2", 1.0]}
+      model__class_weight: {type: categorical, choices: [null, "balanced"]}
+    hist_gradient_boosting:
+      model__max_iter: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_leaf_nodes: {type: int, low: 4, high: 64, log: true}
+      model__min_samples_leaf: {type: int, low: 5, high: 200, log: true}
+      model__l2_regularization: {type: float, low: 0.000001, high: 10.0, log: true}
+    xgboost:
+      model__n_estimators: {type: int, low: 50, high: 600, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.3, log: true}
+      model__max_depth: {type: int, low: 1, high: 8}
+      model__min_child_weight: {type: float, low: 1.0, high: 50.0, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+      model__colsample_bytree: {type: float, low: 0.5, high: 1.0}
+      model__reg_lambda: {type: float, low: 0.01, high: 10.0, log: true}
+      model__reg_alpha: {type: float, low: 0.001, high: 10.0, log: true}
+      model__gamma: {type: float, low: 0.0, high: 5.0}
+
+# After the final refit: predict the new people. Same cleaning and feature split, no row dropped.
+predict:
+  path: "data/adult_new.csv"
+  output: "predictions/adult_new_predictions.csv"   # tracked in git (results/ is not)
+  threshold: 0.5
+
+# Its own folder and scoreboard, so Adult runs never mix with COMPAS runs.
+output:
+  results_dir: "results/adult"
+  scoreboard: "results/adult/runs.csv"
